@@ -1,0 +1,33 @@
+[package]
+name = "gitbrute"
+version = "0.1.0"
+edition = "2024"
+description = "CLI tool to brute force a git commit hash"
+license = "MIT"
+repository = "https://github.com/RobbyV2/gitbrute"
+readme = "README.md"
+keywords = ["git", "brute-force", "commit", "hash", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+sha1 = "0.10"
+anyhow = "1.0"
+regex = "1.10"
+num_cpus = "1.16"
+crossbeam-channel = "0.5"
+hex = "0.4"
+itertools = "0.12"
+
+[package.metadata.deb]
+maintainer = "GitBrute Contributors"
+copyright = "2025, GitBrute Contributors"
+license-file = ["README.md", "4"]
+extended-description = """
+gitbrute brute-forces a pair of author+committer timestamps such that the resulting git commit has your desired prefix."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/gitbrute", "usr/bin/", "755"],
+]
+
