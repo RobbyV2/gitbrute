@@ -3,9 +3,12 @@ use clap::Parser;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use regex::bytes::Regex;
 use sha1::{Digest, Sha1};
-use std::io::Write;
+use std::io::{self, Write};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -53,6 +56,7 @@ struct BruteForceTask {
     committer_idx: usize,
     prefix: String,
     pattern: Option<Regex>,
+    counter: Arc<AtomicU64>,
     rx_try: Receiver<Try>,
     tx_winner: Sender<Solution>,
     rx_done: Receiver<()>,
@@ -124,15 +128,15 @@ fn main() -> Result<()> {
 
     let (tx_try, rx_try) = bounded::<Try>(512);
     let (tx_winner, rx_winner) = bounded::<Solution>(1);
-    let (tx_done, rx_done) = bounded::<()>(0); // signal channel (using 0 capacity for rendezvous or just close) but we can just use capacity 1 or unbounded.
+    let (tx_done, rx_done) = bounded::<()>(0);
+    let counter = Arc::new(AtomicU64::new(0));
 
     thread::spawn(move || {
         explore(tx_try);
     });
 
-    // Start workers
-    let pattern_rx = pattern_rx;
     let prefix = args.prefix.clone();
+    let prefix_len = prefix.len();
 
     let mut workers = Vec::with_capacity(cpus);
     for _ in 0..cpus {
@@ -144,6 +148,7 @@ fn main() -> Result<()> {
         let committer_date = committer_date.clone();
         let prefix = prefix.clone();
         let pattern_rx = pattern_rx.clone();
+        let counter = Arc::clone(&counter);
 
         workers.push(thread::spawn(move || {
             brute_force(BruteForceTask {
@@ -154,6 +159,7 @@ fn main() -> Result<()> {
                 committer_idx,
                 prefix,
                 pattern: pattern_rx,
+                counter,
                 rx_try,
                 tx_winner,
                 rx_done,
@@ -163,16 +169,29 @@ fn main() -> Result<()> {
 
     drop(tx_winner);
 
+    let display_counter = Arc::clone(&counter);
+    let display_done = rx_done.clone();
+    thread::spawn(move || {
+        display_progress(display_counter, display_done, prefix_len);
+    });
+
+    let start = Instant::now();
     let w = rx_winner
         .recv()
         .context("Workers finished without finding a solution")?;
 
     drop(tx_done);
 
+    let elapsed = start.elapsed();
+    let total = counter.load(Ordering::Relaxed);
+    print!("\r\x1b[2K");
     println!(
-        "Found solution: Author: {}, Committer: {}",
-        w.author, w.committer
+        "Found in {:.2}s | {} attempts | {:.2} Mh/s",
+        elapsed.as_secs_f64(),
+        format_count(total),
+        total as f64 / elapsed.as_secs_f64() / 1_000_000.0
     );
+    println!("Solution: Author: {}, Committer: {}", w.author, w.committer);
 
     write_solution(w, obj_content)?;
 
@@ -208,6 +227,58 @@ fn explore(tx: Sender<Try>) {
     }
 }
 
+fn display_progress(counter: Arc<AtomicU64>, rx_done: Receiver<()>, prefix_len: usize) {
+    let start = Instant::now();
+    let mut stderr = io::stderr();
+
+    loop {
+        match rx_done.recv_timeout(Duration::from_millis(500)) {
+            Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+        }
+
+        let total = counter.load(Ordering::Relaxed);
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed < 0.001 {
+            continue;
+        }
+        let rate = total as f64 / elapsed;
+
+        let progress = search_probability(total, rate, prefix_len);
+
+        let _ = write!(
+            stderr,
+            "\r\x1b[2K  [{:.1}s] {} attempts | {:.2} Mh/s{}",
+            elapsed,
+            format_count(total),
+            rate / 1_000_000.0,
+            progress
+        );
+        let _ = stderr.flush();
+    }
+}
+
+fn format_count(n: u64) -> String {
+    itertools::Itertools::join(
+        &mut n
+            .to_string()
+            .as_bytes()
+            .rchunks(3)
+            .rev()
+            .map(|chunk| std::str::from_utf8(chunk).unwrap_or("")),
+        ",",
+    )
+}
+
+fn search_probability(attempts: u64, rate: f64, prefix_len: usize) -> String {
+    if prefix_len == 0 || rate < 1.0 {
+        return " | Chance of finding: N/A".to_string();
+    }
+    let expected = 16_u64.pow(prefix_len as u32) as f64;
+    let probability = 1.0 - (-1.0 * attempts as f64 / expected).exp();
+    format!(" | Chance of finding: {:.0}%", probability * 100.0)
+}
+
 fn brute_force(mut task: BruteForceTask) {
     let mut hasher = Sha1::new();
     let prefix_bytes = if !task.prefix.is_empty() {
@@ -240,6 +311,7 @@ fn brute_force(mut task: BruteForceTask) {
                 hasher.update(&task.blob);
                 let result = hasher.finalize_reset();
                 let hex_hash = hex::encode(result);
+                task.counter.fetch_add(1, Ordering::Relaxed);
 
                 let mut match_found = false;
                 if let Some(p) = prefix_bytes {
