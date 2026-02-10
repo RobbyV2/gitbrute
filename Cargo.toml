@@ -20,8 +20,8 @@ hex = "0.4"
 itertools = "0.12"
 
 [package.metadata.deb]
-maintainer = "GitBrute Contributors"
-copyright = "2025, GitBrute Contributors"
+maintainer = "RobbyV2"
+copyright = "2026, RobbyV2"
 license-file = ["README.md", "4"]
 extended-description = """
 gitbrute brute-forces a pair of author+committer timestamps such that the resulting git commit has your desired prefix."""
